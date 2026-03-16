@@ -23,6 +23,7 @@ class SEOWriterConnect {
     public function __construct() {
         add_action('admin_menu', [$this, 'add_admin_menu']);
         add_action('admin_init', [$this, 'register_settings']);
+        add_action('admin_init', [$this, 'handle_regenerate_key']);
         add_action('rest_api_init', [$this, 'register_rest_routes']);
         add_action('wp_head', [$this, 'output_schema_markup'], 1);
         register_activation_hook(__FILE__, [$this, 'on_activate']);
@@ -56,8 +57,35 @@ class SEOWriterConnect {
      * Register settings
      */
     public function register_settings() {
-        register_setting('aitseo_connect', self::OPTION_KEY);
-        register_setting('aitseo_connect', self::OPTION_ENABLED);
+        register_setting('aitseo_connect', self::OPTION_ENABLED, [
+            'type' => 'string',
+            'sanitize_callback' => function ($val) {
+                return $val === '1' ? '1' : '0';
+            },
+        ]);
+    }
+
+    /**
+     * Handle regenerate key request (runs on admin_init, before output)
+     */
+    public function handle_regenerate_key() {
+        if (!isset($_GET['page']) || sanitize_text_field(wp_unslash($_GET['page'])) !== 'aitseo-connect') {
+            return;
+        }
+        if (!isset($_GET['action']) || sanitize_text_field(wp_unslash($_GET['action'])) !== 'regenerate') {
+            return;
+        }
+        if (!isset($_GET['_wpnonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_GET['_wpnonce'])), 'swc_regenerate')) {
+            return;
+        }
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        $new_key = 'swc_' . bin2hex(random_bytes(32));
+        update_option(self::OPTION_KEY, $new_key);
+        wp_safe_redirect(admin_url('options-general.php?page=aitseo-connect&regenerated=1'));
+        exit;
     }
 
     /**
@@ -107,15 +135,12 @@ class SEOWriterConnect {
                 </table>
                 <?php submit_button('Save Settings'); ?>
             </form>
+
+            <?php if (isset($_GET['regenerated'])) : ?>
+                <div class="notice notice-success is-dismissible"><p><?php esc_html_e('Connection Key has been regenerated.', 'aitseo-connect'); ?></p></div>
+            <?php endif; ?>
         </div>
         <?php
-
-        // Handle regenerate
-        if (isset($_GET['action']) && $_GET['action'] === 'regenerate' && wp_verify_nonce($_GET['_wpnonce'], 'swc_regenerate')) {
-            $new_key = 'swc_' . bin2hex(random_bytes(32));
-            update_option(self::OPTION_KEY, $new_key);
-            echo '<script>location.reload();</script>';
-        }
     }
 
     /**
@@ -132,6 +157,13 @@ class SEOWriterConnect {
             'methods' => 'POST',
             'callback' => [$this, 'handle_publish'],
             'permission_callback' => [$this, 'check_connection_key'],
+            'args' => [
+                'title' => [
+                    'required' => true,
+                    'type' => 'string',
+                    'sanitize_callback' => 'sanitize_text_field',
+                ],
+            ],
         ]);
 
         register_rest_route('aitseo/v1', '/site-info', [
@@ -144,6 +176,13 @@ class SEOWriterConnect {
             'methods' => 'POST',
             'callback' => [$this, 'handle_get_posts'],
             'permission_callback' => [$this, 'check_connection_key'],
+            'args' => [
+                'per_page' => [
+                    'type' => 'integer',
+                    'default' => 100,
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
         ]);
     }
 
@@ -304,7 +343,7 @@ class SEOWriterConnect {
             'post_content' => $content,
             'post_status' => $status,
             'post_type' => 'post',
-            'post_author' => 1, // Default to admin
+            'post_author' => $this->get_default_author(),
         ];
 
         // Handle scheduled date for future posts
@@ -394,7 +433,7 @@ class SEOWriterConnect {
                     set_post_thumbnail($post_id, $attach_id);
                 }
             } else {
-                @unlink($tmp);
+                wp_delete_file($tmp);
             }
         }
 
@@ -448,14 +487,28 @@ class SEOWriterConnect {
     /**
      * Ping IndexNow API to notify search engines about new/updated content
      */
+    /**
+     * Get the default post author (first administrator)
+     */
+    private function get_default_author() {
+        $admins = get_users(['role' => 'administrator', 'number' => 1, 'fields' => 'ID']);
+        return !empty($admins) ? (int) $admins[0] : 1;
+    }
+
     private function ping_indexnow($url) {
-        $host = parse_url(get_site_url(), PHP_URL_HOST);
         $key = substr(md5(get_option(self::OPTION_KEY, '')), 0, 32);
 
         // Store IndexNow key as a text file (required by protocol)
         $key_file = ABSPATH . $key . '.txt';
         if (!file_exists($key_file)) {
-            @file_put_contents($key_file, $key);
+            global $wp_filesystem;
+            if (empty($wp_filesystem)) {
+                require_once ABSPATH . 'wp-admin/includes/file.php';
+                WP_Filesystem();
+            }
+            if ($wp_filesystem) {
+                $wp_filesystem->put_contents($key_file, $key, FS_CHMOD_FILE);
+            }
         }
 
         // Submit to IndexNow (supported by Google, Bing, Yandex, Naver)
