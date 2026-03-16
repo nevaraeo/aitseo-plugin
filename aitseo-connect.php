@@ -485,9 +485,6 @@ class SEOWriterConnect {
     }
 
     /**
-     * Ping IndexNow API to notify search engines about new/updated content
-     */
-    /**
      * Get the default post author (first administrator)
      */
     private function get_default_author() {
@@ -495,6 +492,9 @@ class SEOWriterConnect {
         return !empty($admins) ? (int) $admins[0] : 1;
     }
 
+    /**
+     * Ping IndexNow API to notify search engines about new/updated content
+     */
     private function ping_indexnow($url) {
         $key = substr(md5(get_option(self::OPTION_KEY, '')), 0, 32);
 
